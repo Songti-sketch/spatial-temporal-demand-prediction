@@ -1,0 +1,325 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from preprocessing3 import Preprocessor
+from estimation3 import Estimator, EstimationResult
+import os
+import pdb
+
+class TemporalAnalyzer:
+    @staticmethod
+    def run_analysis(df, time_intervals, dist_per_grid=0.5, timeperiod=30, training_dates=None, testing_dates=None,
+                     max_iter=200, tol=1e-4, grid_dependent=True, penalty=0):
+        training_dates = [pd.to_datetime(date).date() for date in training_dates]
+        testing_dates = [pd.to_datetime(date).date() for date in testing_dates]
+        all_dates = training_dates + testing_dates
+        base_df = Preprocessor.preprocess(df, all_dates)
+        
+        results = []
+        # all_relative_errors = []
+        for win_start, win_end in time_intervals:
+            print(f"Processing time window: {win_start} to {win_end}")
+            start_time = pd.to_datetime(win_start).time()
+            end_time = pd.to_datetime(win_end).time()
+            win_df_train = base_df[(base_df['date'].isin(training_dates)) & 
+                                   (base_df['time'] >= start_time) & 
+                                   (base_df['time'] <= end_time)].copy()
+            win_df_train['time_window'] = f"{win_start}-{win_end}"
+            
+            if len(win_df_train) > 0:
+                omega, beta, lambda_hat, dist, p_m = Estimator.estimate_parameters(
+                    win_df_train, dist_per_grid, timeperiod, max_iter=max_iter, tol=tol, grid_dependent=grid_dependent, penalty=penalty)
+                
+                in_sample_wmapes = {}
+                in_sample_relative_errors = []
+                for train_date in training_dates:
+                    win_df_train = base_df[(base_df['date'] == train_date) & 
+                                           (base_df['time'] >= start_time) & 
+                                           (base_df['time'] <= end_time)].copy()
+                    if len(win_df_train) > 0:
+                        win_df_train['time_window'] = f"{win_start}-{win_end}"
+                        in_sample_wmape, relative_errors = Estimator.calculate_wmape(
+                            p_m, omega, beta, lambda_hat, dist, 
+                            win_df_train, dist_per_grid, timeperiod,
+                            grid_dependent=grid_dependent)
+                        in_sample_wmapes[train_date] = in_sample_wmape
+                        in_sample_relative_errors.extend(relative_errors)
+
+                out_sample_wmapes = {}
+                out_sample_relative_errors = []
+                for test_date in testing_dates:
+                    win_df_test = base_df[(base_df['date'] == test_date) & 
+                                          (base_df['time'] >= start_time) & 
+                                          (base_df['time'] <= end_time)].copy()
+                    if len(win_df_test) > 0:
+                        out_sample_wmape, relative_errors = Estimator.calculate_wmape(
+                            p_m, omega, beta, lambda_hat, dist,
+                            win_df_test, dist_per_grid, timeperiod,
+                            grid_dependent=grid_dependent)
+                        out_sample_wmapes[test_date] = out_sample_wmape
+                        out_sample_relative_errors.extend(relative_errors)
+                
+                # all_relative_errors.extend(in_sample_relative_errors)
+                # all_relative_errors.extend(out_sample_relative_errors)
+                
+                result = EstimationResult(f"{win_start}-{win_end}")
+                result.time_window = f"{win_start}-{win_end}"
+                result.p_hat = p_m
+                result.omega = omega
+                result.beta = beta
+                result.lambda_hat = lambda_hat
+                result.in_sample_wmapes = in_sample_wmapes
+                result.out_sample_wmapes = out_sample_wmapes
+                result.dist_per_grid = dist_per_grid
+                result.in_relative_errors = in_sample_relative_errors 
+                result.out_relative_errors = out_sample_relative_errors
+                results.append(result)
+        return results
+
+    @staticmethod
+    def visualize_results(results, save_dir):
+        ''''
+        results: List of EstimationResult objects
+        save_dir: Directory to save the plots
+        '''
+        # time_windows = [
+        # ('08:00', '10:00'),
+        # ('10:00', '12:00'),
+        # ('12:00', '14:00'),
+        # ('14:00', '16:00'),
+        # ('16:00', '18:00'),
+        # ('18:00', '20:00'),
+        # ('20:00', '22:00'),
+        # ('22:00', '23:59')
+        # ]
+
+        num_total_cells = len(results[0].omega)
+        # windows = time_windows
+        windows = [r.time_window for r in results] # shape
+        # windows = [f"{start}-{end}" for start, end in time_windows]
+        # windows = [t for t in windows]
+        
+        alphas = [result.beta[0] for result in results]
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(windows, alphas, marker='o')
+        plt.title('Alpha Across Time Windows')
+        plt.xlabel('Time Window')
+        plt.ylabel('Alpha')
+        plt.xticks(rotation=45)
+        plt.savefig(os.path.join(save_dir, 'alpha.png'))
+        plt.close()
+
+        v_dict = {r.time_window: r.beta[1:1+num_total_cells] for r in results}
+        v_df = pd.DataFrame(v_dict)
+        v_df.index.name = 'Location Index'
+        plt.figure(figsize=(15, 8))
+        for time_window in v_df.columns:
+            plt.plot(v_df.index, v_df[time_window], marker='o', label=time_window)
+        plt.title('v Distribution Across Location Indices')
+        plt.xlabel('Location Index')
+        plt.ylabel('v Value')
+        plt.legend(title='Time Window', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'v_distribution.png'))
+        plt.close()
+
+        v0_dict = {r.time_window: r.beta[1+num_total_cells:] for r in results}
+        v0_df = pd.DataFrame(v0_dict)
+        v0_df.index.name = 'Location Index'
+        plt.figure(figsize=(15, 8))
+        for time_window in v0_df.columns:
+            plt.plot(v0_df.index, v0_df[time_window], marker='o', label=time_window)
+        plt.title('v0 Distribution Across Location Indices')
+        plt.xlabel('Location Index')
+        plt.ylabel('v0 Value')
+        plt.legend(title='Time Window', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'v0_distribution.png'))
+        plt.close()
+
+        v_means = [np.mean(result.beta[1:1+num_total_cells]) for result in results]
+        v_stds = [np.std(result.beta[1:1+num_total_cells]) for result in results]
+        plt.figure(figsize=(10, 5))
+        plt.errorbar(windows, v_means, yerr=v_stds, marker='o', capsize=5)
+        plt.title('Mean and Std of v Across Time Windows')
+        plt.xlabel('Time Window')
+        plt.ylabel('v (mean ± std)')
+        plt.xticks(rotation=45)
+        plt.savefig(os.path.join(save_dir, 'v_summary.png'))
+        plt.close()
+
+        v0_means = [np.mean(result.beta[1+num_total_cells:]) for result in results]
+        v0_stds = [np.std(result.beta[1+num_total_cells:]) for result in results]
+        plt.figure(figsize=(10, 5))
+        plt.errorbar(windows, v0_means, yerr=v0_stds, marker='o', capsize=5)
+        plt.title('Mean and Std of v0 Across Time Windows')
+        plt.xlabel('Time Window')
+        plt.ylabel('v0 (mean ± std)')
+        plt.xticks(rotation=45)
+        plt.savefig(os.path.join(save_dir, 'v0_summary.png'))
+        plt.close()
+
+        plt.figure(figsize=(12, 6))
+        lambdas = [r.lambda_hat for r in results]
+        sns.barplot(x=windows, y=lambdas)
+        plt.title('Lambda Values Across Time Windows')
+        plt.ylabel('Lambda')
+        plt.xticks(rotation=45)
+        plt.savefig(os.path.join(save_dir, 'lambda_comparison.png'))
+        plt.close()
+
+        plt.figure(figsize=(12, 6))
+        for train_date in set().union(*[r.in_sample_wmapes.keys() for r in results]):
+            in_sample_wmapes = [r.in_sample_wmapes.get(train_date, np.nan) for r in results]
+            sns.lineplot(x=windows, y=in_sample_wmapes, marker='o', label=f'In-sample WMAPE ({train_date})')
+        plt.title('In-sample WMAPE Across Time Windows')
+        plt.ylabel('WMAPE (%)')
+        plt.xticks(rotation=45)
+        plt.legend()
+        plt.savefig(os.path.join(save_dir, 'in_sample_wmape.png'))
+        plt.close()
+
+        plt.figure(figsize=(12, 6))
+        for test_date in set().union(*[r.out_sample_wmapes.keys() for r in results]):
+            out_sample_wmapes = [r.out_sample_wmapes.get(test_date, np.nan) for r in results]
+            sns.lineplot(x=windows, y=out_sample_wmapes, marker='o', label=f'Out-sample WMAPE ({test_date})')
+        plt.title('Out-of-sample WMAPE Across Time Windows')
+        plt.ylabel('WMAPE (%)')
+        plt.xticks(rotation=45)
+        plt.legend()
+        plt.savefig(os.path.join(save_dir, 'out_sample_wmape.png'))
+        plt.close()
+
+        omega_dict = {r.time_window: r.omega for r in results}
+        omega_df = pd.DataFrame(omega_dict)
+        omega_df.index.name = 'Location Index'
+        plt.figure(figsize=(15, 8))
+        for time_window in omega_df.columns:
+            plt.plot(omega_df.index, omega_df[time_window], marker='o', label=time_window)
+        plt.title('Omega Distribution Across Location Indices')
+        plt.xlabel('Location Index')
+        plt.ylabel('Omega Value')
+        plt.legend(title='Time Window', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'omega_distribution.png'))
+        plt.close()
+
+        # Box plot for relative errors
+        font_size = 15
+    # Prepare data for in-sample relative errors, filtering above 95th quantile
+
+        in_relative_errors_dict = {}
+        # in_medians = {}
+        in_mean = {}
+        for r in results:
+            # r correspond to element in time_windows: 
+            # time_window 
+            errors = np.array(r.in_relative_errors)
+            # errors = np.concatenate(r.in_relative_errors) # it means
+            if len(errors) > 0:  # Ensure there are values to compute quantile
+                quantile_95 = np.quantile(errors, 0.95)
+                filtered_errors = errors[errors <= quantile_95]
+                # add the rth element of time_windows to in_relative_errors_dict
+                in_relative_errors_dict[r.time_window] = filtered_errors
+
+
+                # in_medians[r.time_window] = np.median(filtered_errors) if len(filtered_errors) > 0 else np.nan
+                in_mean[r.time_window] = np.mean(filtered_errors)
+            else:
+                in_relative_errors_dict[r.time_window] = []
+                # in_medians[r.time_window] = np.nan
+                in_mean[r.time_window] = np.nan
+        
+        in_relative_errors_df = pd.DataFrame(dict([(k, pd.Series(v)) for k, v in in_relative_errors_dict.items()]))
+        print(in_relative_errors_df)
+        # Create boxplot for in-sample relative errors
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=in_relative_errors_df)
+        
+        # replace time_windows with windows
+        # in_relative_errors_df.columns = [f"{start}-{end}" for start, end in windows]
+        # Add median markers
+        for idx, time_window in enumerate(in_relative_errors_df.columns):
+            # median_val = in_medians[time_window]
+            # mean_val = np.mean(in_relative_errors_df[time_window])
+            mean_val = in_mean[time_window]
+            if not np.isnan(mean_val):
+                plt.plot(idx, mean_val, 'rD', markersize=8, label='Mean' if idx == 0 else '')
+        
+        plt.title('In-sample Relative Errors Across Time Windows (Below 95th Quantile)', fontsize=font_size)
+        plt.ylabel('Error (%)', fontsize=font_size)
+        plt.xlabel('Time Window', fontsize=font_size)
+        plt.xticks(rotation=45)
+        plt.legend()
+        plt.savefig(os.path.join(save_dir, 'in_relative_errors.png'))
+        plt.show()
+        
+        # Prepare data for out-of-sample relative errors, filtering above 95th quantile
+        out_relative_errors_dict = {}
+        # out_medians = {}
+        out_mean = {}
+        for r in results:
+            errors = np.array(r.out_relative_errors)
+            # errors = np.concatenate(r.out_relative_errors)
+            if len(errors) > 0:  # Ensure there are values to compute quantile
+                quantile_95 = np.quantile(errors, 0.95)
+                filtered_errors = errors[errors <= quantile_95]
+                out_relative_errors_dict[r.time_window] = filtered_errors
+                # out_medians[r.time_window] = np.median(filtered_errors) if len(filtered_errors) > 0 else np.nan
+                out_mean[r.time_window] = np.mean(filtered_errors)
+            else:
+                out_relative_errors_dict[r.time_window] = []
+                # out_medians[r.time_window] = np.nan
+                out_mean[r.time_window] = np.nan
+        
+        out_relative_errors_df = pd.DataFrame(dict([(k, pd.Series(v)) for k, v in out_relative_errors_dict.items()]))
+        # use windows as columns and relative errors as rows
+        # out_relative_errors_df.columns = [f"{start}-{end}" for start, end in windows]
+        # Create boxplot for out-of-sample relative errors
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=out_relative_errors_df)
+        
+        # Add median markers
+        for idx, time_window in enumerate(out_relative_errors_df.columns):
+            # median_val = out_medians[time_window]
+            mean_val = out_mean[time_window]
+            if not np.isnan(mean_val):
+                plt.plot(idx, mean_val, 'rD', markersize=8, label='Mean' if idx == 0 else '')
+        
+        plt.title('Out-of-sample Relative Errors Across Time Windows (Below 95th Quantile)', fontsize=font_size)
+        plt.ylabel('Error (%)', fontsize=font_size)
+        plt.xlabel('Time Window', fontsize=font_size)
+        plt.xticks(rotation=45)
+        plt.legend()
+        plt.savefig(os.path.join(save_dir, 'out_relative_errors.png'))
+        plt.show()
+
+
+if __name__ == "__main__":
+    time_windows = [
+        ('08:00', '10:00'),
+        ('10:00', '12:00'),
+        ('12:00', '14:00'),
+        ('14:00', '16:00'),
+        ('16:00', '18:00'),
+        ('18:00', '20:00'),
+        ('20:00', '22:00'),
+        ('22:00', '23:59')
+    ]
+    training_dates = ['2022-10-17', '2022-10-18', '2022-10-19']
+    testing_dates = ['2022-10-20', '2022-10-21']
+    df = pd.read_csv('/home/go3/wch_code/jx/real_data/data/cleaned_data2.csv')
+    analysis_results = TemporalAnalyzer.run_analysis(
+        df=df,
+        time_intervals=time_windows,
+        dist_per_grid=3,
+        timeperiod=30,
+        training_dates=training_dates,
+        testing_dates=testing_dates
+    )
+    save_dir = 'try'
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    TemporalAnalyzer.visualize_results(analysis_results, save_dir)
